@@ -172,35 +172,45 @@ function getConcurrency(func, envVars) {
 export const warmUp = async (event, context) => {
   logVerbose('Warm Up Start');
 
-  const invokes = await Promise.all(functions.map(async (func) => {
-    const concurrency = getConcurrency(func, process.env);
+  const chunkSize = 20;
+  const chunkedFunctions = [];
+  for (let i = 0; i < functions.length; i += chunkSize) {
+    chunkedFunctions.push(functions.slice(i, i + chunkSize));
+  }
 
-    const clientContext = func.config.clientContext !== undefined
-      ? func.config.clientContext
-      : func.config.payload;
+  const invokes = await chunkedFunctions.reduce(async (previousPromise, chunk) => {
+    const previousResults = await previousPromise;
+    const chunkResults = await Promise.allSettled(chunk.map(async (func) => {
+      const concurrency = getConcurrency(func, process.env);
 
-    const invokeCommand = new InvokeCommand({
-      ClientContext: clientContext
-        ? Buffer.from(\`{"custom":\${clientContext}}\`).toString('base64')
-        : undefined,
-      FunctionName: func.name,
-      InvocationType: 'RequestResponse',
-      LogType: 'None',
-      Qualifier: func.config.alias || process.env.SERVERLESS_ALIAS,
-      Payload: func.config.payload
-    });
+      const clientContext = func.config.clientContext !== undefined
+        ? func.config.clientContext
+        : func.config.payload;
 
-    try {
-      await Promise.all(Array(concurrency).fill(0).map(async () => await lambdaClient.send(invokeCommand)));
-      logVerbose(\`Warm Up Invoke Success: \${func.name}\`);
-      return true;
-    } catch (e) {
-      console.error(\`Warm Up Invoke Error: \${func.name}\`, e);
-      return false;
-    }
-  }));
+      const invokeCommand = new InvokeCommand({
+        ClientContext: clientContext
+          ? Buffer.from(\`{"custom":\${clientContext}}\`).toString('base64')
+          : undefined,
+        FunctionName: func.name,
+        InvocationType: 'RequestResponse',
+        LogType: 'None',
+        Qualifier: func.config.alias || process.env.SERVERLESS_ALIAS,
+        Payload: func.config.payload
+      });
 
-  logVerbose(\`Warm Up Finished with \${invokes.filter(r => !r).length} invoke errors\`);
+      try {
+        await Promise.all(Array(concurrency).fill(0).map(async () => await lambdaClient.send(invokeCommand)));
+        logVerbose(\`Warm Up Invoke Success: \${func.name}\`);
+        return true;
+      } catch (e) {
+        console.error(\`Warm Up Invoke Error: \${func.name}\`, e);
+        return false;
+      }
+    }));
+    return [...previousResults, ...chunkResults.map(result => result.status === 'fulfilled' ? result.value : false)];
+  }, Promise.resolve([]));
+
+  // logVerbose(\`Warm Up Finished with \${invokes.filter(r => !r).length} invoke errors\`);
 }`;
 
   /** Write warm up file */
